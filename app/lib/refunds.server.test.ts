@@ -15,6 +15,11 @@ import {
   raiseRefundRequest,
 } from "./refunds.server";
 import {
+  getLessonSavedState,
+  saveNote,
+  toggleBookmark,
+} from "./saved-items.server";
+import {
   fakeNotifications,
   type FakeNotifications,
 } from "./notifications.fake.server";
@@ -267,6 +272,12 @@ describe("the refund offer on the course page", () => {
 describe("approving a Refund Request", () => {
   it("removes the buyer's Enrollment but keeps their progress", async () => {
     const purchase = buyForSelf(base.user.id);
+    const savedItemKey = { userId: base.user.id, lessonId: lessonIds[0] };
+    toggleBookmark(db, savedItemKey, NOW);
+    expect(saveNote(db, savedItemKey, "Keep this private note.", NOW)).toEqual({
+      ok: true,
+    });
+
     db.insert(schema.lessonProgress)
       .values({
         userId: base.user.id,
@@ -287,6 +298,10 @@ describe("approving a Refund Request", () => {
         .where(eq(schema.lessonProgress.userId, base.user.id))
         .all()
     ).toHaveLength(1);
+    expect(getLessonSavedState(db, savedItemKey)).toMatchObject({
+      bookmarked: true,
+      note: { body: "Keep this private note." },
+    });
 
     const refundRequest = db
       .select()

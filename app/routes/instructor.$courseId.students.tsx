@@ -5,7 +5,12 @@ import { UserRole } from "~/db/schema";
 import { isLapsed } from "~/lib/enrollments";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
-import { AlertTriangle, ArrowLeft, Users, Award } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Users,
+  Award,
+} from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { db } from "~/db";
 import {
@@ -20,7 +25,7 @@ import {
   purchases,
   LessonProgressStatus,
 } from "~/db/schema";
-import { eq, and, or, sql, desc, inArray, max } from "drizzle-orm";
+import { eq, and, or, sql, desc, inArray, isNull, max } from "drizzle-orm";
 
 function getUserById(id: number) {
   return db.select().from(users).where(eq(users.id, id)).get();
@@ -499,6 +504,7 @@ export default function InstructorStudentRoster({
           </CardContent>
         </Card>
       )}
+
     </div>
   );
 }
