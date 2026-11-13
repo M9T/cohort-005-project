@@ -92,6 +92,13 @@
       "when": 1791527437513,
       "tag": "0012_colossal_maggott",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1794575145750,
+      "tag": "0013_familiar_yellowjacket",
+      "breakpoints": true
     }
   ]
 }
