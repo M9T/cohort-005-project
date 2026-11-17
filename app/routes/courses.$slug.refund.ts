@@ -1,12 +1,13 @@
 import { data, redirect } from "react-router";
 import { z } from "zod";
 import type { Route } from "./+types/courses.$slug.refund";
-import { getCurrentUserId } from "~/lib/session";
+import { people } from "~/modules/permissions/person.server";
 import { db } from "~/db";
 import { courses, purchases } from "~/db/schema";
 import { eq } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
 import { raiseRefundRequest } from "~/lib/refunds.server";
+import { defaultNotifications } from "~/lib/notifications.server";
 import { sendEmail } from "~/lib/mailer.server";
 
 const refundParamsSchema = z.object({
@@ -30,11 +31,7 @@ function getCourseBySlug(slug: string) {
 }
 
 export async function action({ params, request }: Route.ActionArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("You must be logged in to request a refund.", { status: 401 });
-  }
+  const { id: currentUserId } = await people.requirePerson(request);
 
   const { slug } = parseParams(params, refundParamsSchema);
   const course = getCourseBySlug(slug);
@@ -60,12 +57,13 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("Purchase not found.", { status: 404 });
   }
 
-  const result = raiseRefundRequest(
+  const result = await raiseRefundRequest(
     db,
     purchase.id,
     currentUserId,
     parsed.data.reason,
-    new Date()
+    new Date(),
+    await defaultNotifications()
   );
 
   if (!result.ok) {

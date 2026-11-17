@@ -1,24 +1,14 @@
 import { Link, redirect } from "react-router";
 import type { Route } from "./+types/courses.$slug.welcome";
 import { db } from "~/db";
-import {
-  courses,
-  categories,
-  users,
-  modules,
-  lessons,
-  enrollments,
-} from "~/db/schema";
-import { eq, and, or } from "drizzle-orm";
-import { getCurrentUserId } from "~/lib/session";
+import { courses, categories, users, modules, lessons } from "~/db/schema";
+import { eq, or } from "drizzle-orm";
+import { coursePermissions } from "~/modules/permissions/course-permissions.server";
+import { lessonAccess } from "~/modules/lesson/index.server";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
 import { PartyPopper, MessageCircle, PlayCircle } from "lucide-react";
 import { data } from "react-router";
-
-function getCourseBySlug(slug: string) {
-  return db.select().from(courses).where(eq(courses.slug, slug)).get();
-}
 
 function getCourseWithDetails(id: number) {
   const course = db
@@ -56,17 +46,7 @@ function getCourseWithDetails(id: number) {
     .orderBy(modules.position)
     .all();
 
-  const moduleIds = courseModules.map((m) => m.id);
-
-  const courseLessons =
-    moduleIds.length > 0
-      ? db
-          .select()
-          .from(lessons)
-          .where(or(...moduleIds.map((mid) => eq(lessons.moduleId, mid)))!)
-          .orderBy(lessons.position)
-          .all()
-      : [];
+  const courseLessons = lessonAccess.getLessonPreviews(id);
 
   return {
     ...course,
@@ -75,17 +55,6 @@ function getCourseWithDetails(id: number) {
       lessons: courseLessons.filter((l) => l.moduleId === mod.id),
     })),
   };
-}
-
-function isUserEnrolled(userId: number, courseId: number) {
-  const enrollment = db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
-  return !!enrollment;
 }
 
 export function meta({ loaderData }: Route.MetaArgs) {
@@ -98,20 +67,20 @@ export function meta({ loaderData }: Route.MetaArgs) {
 
 export async function loader({ params, request }: Route.LoaderArgs) {
   const slug = params.slug;
-  const course = getCourseBySlug(slug);
-
-  if (!course) {
+  const decisions = await coursePermissions.getCourseDecisions(request, {
+    slug,
+  });
+  if (!decisions.found) {
     throw data("Course not found.", { status: 404 });
   }
 
-  const currentUserId = await getCurrentUserId(request);
-  if (!currentUserId) {
+  // The welcome page is for Students starting the course. Anyone else,
+  // including a Student under Country Lock, goes to the course page, which
+  // explains why.
+  if (!decisions.take.allowed) {
     throw redirect(`/courses/${slug}`);
   }
-
-  if (!isUserEnrolled(currentUserId, course.id)) {
-    throw redirect(`/courses/${slug}`);
-  }
+  const { course } = decisions;
 
   const courseWithDetails = getCourseWithDetails(course.id);
   if (!courseWithDetails) {
@@ -157,11 +126,7 @@ export default function Welcome({ loaderData }: Route.ComponentProps) {
                 rel="noopener noreferrer"
                 className="block"
               >
-                <Button
-                  variant="outline"
-                  size="lg"
-                  className="w-full max-w-sm"
-                >
+                <Button variant="outline" size="lg" className="w-full max-w-sm">
                   <MessageCircle className="mr-2 size-5" />
                   Join the Discord Community
                 </Button>

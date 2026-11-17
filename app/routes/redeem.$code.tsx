@@ -3,17 +3,25 @@ import { useEffect } from "react";
 import { toast } from "sonner";
 import { z } from "zod";
 import type { Route } from "./+types/redeem.$code";
-import { getCurrentUserId } from "~/lib/session";
+import { people } from "~/modules/permissions/person.server";
 import { resolveCountry } from "~/lib/country.server";
 import { parseParams, parseFormData } from "~/lib/validation";
 import { getSeatAvailability } from "~/lib/refunds.server";
+import { isEnrolled } from "~/lib/enrollments.server";
+import { defaultNotifications } from "~/lib/notifications.server";
+import {
+  claimSeat,
+  isSeatCountryLocked,
+  SEAT_ON_HOLD,
+  SEAT_REFUNDED,
+} from "~/lib/seat-claims.server";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Ticket, AlertCircle, CheckCircle2, Globe } from "lucide-react";
 import { data } from "react-router";
 import { db } from "~/db";
-import { purchases, coupons, courses, enrollments } from "~/db/schema";
-import { eq, and } from "drizzle-orm";
+import { coupons, courses } from "~/db/schema";
+import { eq } from "drizzle-orm";
 
 function getCourseById(id: number) {
   return db.select().from(courses).where(eq(courses.id, id)).get();
@@ -21,95 +29,6 @@ function getCourseById(id: number) {
 
 function getCouponByCode(code: string) {
   return db.select().from(coupons).where(eq(coupons.code, code)).get();
-}
-
-function isUserEnrolled(userId: number, courseId: number) {
-  const existing = db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
-
-  return !!existing;
-}
-
-const SEAT_ON_HOLD =
-  "This seat can't be claimed right now. Ask the person who shared it with you.";
-const SEAT_REFUNDED =
-  "This seat is no longer available. Ask the person who shared it with you.";
-
-type RedeemResult =
-  | { ok: true; enrollment: typeof enrollments.$inferSelect }
-  | { ok: false; error: string };
-
-function redeemCoupon(
-  code: string,
-  userId: number,
-  userCountry: string
-): RedeemResult {
-  const coupon = getCouponByCode(code);
-  if (!coupon) {
-    return { ok: false, error: "Coupon not found" };
-  }
-
-  if (coupon.redeemedByUserId !== null) {
-    return { ok: false, error: "Coupon has already been redeemed" };
-  }
-
-  const availability = getSeatAvailability(db, coupon);
-  if (availability === "on_hold") {
-    return { ok: false, error: SEAT_ON_HOLD };
-  }
-  if (availability === "refunded") {
-    return { ok: false, error: SEAT_REFUNDED };
-  }
-
-  const existingEnrollment = db
-    .select()
-    .from(enrollments)
-    .where(
-      and(
-        eq(enrollments.userId, userId),
-        eq(enrollments.courseId, coupon.courseId)
-      )
-    )
-    .get();
-
-  if (existingEnrollment) {
-    return { ok: false, error: "You are already enrolled in this course" };
-  }
-
-  const purchase = db
-    .select()
-    .from(purchases)
-    .where(eq(purchases.id, coupon.purchaseId))
-    .get();
-
-  if (purchase?.country && purchase.country !== userCountry) {
-    return {
-      ok: false,
-      error:
-        "This coupon can only be redeemed from the same country as the purchaser",
-    };
-  }
-
-  db.update(coupons)
-    .set({
-      redeemedByUserId: userId,
-      redeemedAt: new Date().toISOString(),
-    })
-    .where(eq(coupons.id, coupon.id))
-    .run();
-
-  const enrollment = db
-    .insert(enrollments)
-    .values({ userId, courseId: coupon.courseId })
-    .returning()
-    .get();
-
-  return { ok: true, enrollment };
 }
 
 const redeemParamsSchema = z.object({
@@ -136,12 +55,13 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Coupon not found.", { status: 404 });
   }
 
-  const currentUserId = await getCurrentUserId(request);
-  if (!currentUserId) {
+  const person = await people.getPerson(request);
+  if (!person) {
     throw redirect(
       `/login?redirectTo=${encodeURIComponent(`/redeem/${code}`)}`
     );
   }
+  const currentUserId = person.id;
 
   const course = getCourseById(coupon.courseId);
   if (!course) {
@@ -149,7 +69,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   }
 
   const alreadyRedeemed = coupon.redeemedByUserId !== null;
-  const alreadyEnrolled = isUserEnrolled(currentUserId, coupon.courseId);
+  const alreadyEnrolled = isEnrolled(db, currentUserId, coupon.courseId);
   const availability = getSeatAvailability(db, coupon);
   const unavailableReason =
     availability === "on_hold"
@@ -158,19 +78,11 @@ export async function loader({ params, request }: Route.LoaderArgs) {
         ? SEAT_REFUNDED
         : null;
 
-  // Check country mismatch upfront so we can show a clear message
-  let countryMismatch = false;
-  if (!alreadyRedeemed && !alreadyEnrolled) {
-    const userCountry = await resolveCountry(request);
-    const purchase = db
-      .select()
-      .from(purchases)
-      .where(eq(purchases.id, coupon.purchaseId))
-      .get();
-    if (purchase?.country && purchase.country !== (userCountry ?? "")) {
-      countryMismatch = true;
-    }
-  }
+  // Check the Country Lock upfront so we can show a clear message
+  const countryMismatch =
+    !alreadyRedeemed &&
+    !alreadyEnrolled &&
+    isSeatCountryLocked(db, coupon, await resolveCountry(request));
 
   return {
     course: { id: course.id, title: course.title, slug: course.slug },
@@ -185,10 +97,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 export async function action({ params, request }: Route.ActionArgs) {
   const { code } = parseParams(params, redeemParamsSchema);
 
-  const currentUserId = await getCurrentUserId(request);
-  if (!currentUserId) {
-    throw data("You must be logged in.", { status: 401 });
-  }
+  const { id: currentUserId } = await people.requirePerson(request);
 
   const formData = await request.formData();
   const parsed = parseFormData(formData, redeemActionSchema);
@@ -198,7 +107,14 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   const userCountry = await resolveCountry(request);
-  const result = redeemCoupon(code, currentUserId, userCountry ?? "");
+  const result = await claimSeat(
+    db,
+    code,
+    currentUserId,
+    userCountry,
+    new Date(),
+    await defaultNotifications()
+  );
 
   if (!result.ok) {
     return data({ error: result.error }, { status: 400 });
@@ -234,10 +150,6 @@ export default function Redeem({
       toast.error(error);
     }
   }, [fetcher.data, actionData]);
-
-  // Determine which state to show
-  const canRedeem =
-    !alreadyRedeemed && !alreadyEnrolled && !countryMismatch && !unavailableReason;
 
   return (
     <div className="mx-auto max-w-2xl p-6 lg:p-8">
